@@ -14,27 +14,31 @@ CIHAZ_LISTESI = [
    {"ip": "10.50.27.31", "user": "admin", "pass": "Abcd1234"},
 ]
 
+server = '172.30.134.15'
+database = 'VALFSAN604'
+username = 'pythonreporter'
+password = '1212casecase,,'
+
 GUN_SAYISI = 1
 SESSISIZLIK_LIMITI = 10  # Cihazdan 5 saniye veri gelmezse bağlantıyı kes
+
+pyodbc.pooling = False
 
 
 # --- SQL FONKSİYONU ---
 def sql_yaz(kart_no, zaman_str, cihaz_ip, seri_no):
     try:
-        conn_str = (
-            "DRIVER={ODBC Driver 17 for SQL Server};"
-            "SERVER=10.50.25.54;DATABASE=Timecure_app;"
-            "UID=serkan;PWD=200625sS"
-        )
-        conn = pyodbc.connect(conn_str)
+
+        conn = pyodbc.connect(
+            f'DRIVER={{SQL Server}};SERVER={server};DATABASE={database};UID={username};PWD={password}')
         cursor = conn.cursor()
 
-        check_query = "SELECT COUNT(*) FROM CihazLoglari3 WHERE KartNo=? AND TarihSaat=?"
+        check_query = "SELECT COUNT(*) FROM CihazLoglari WHERE KartNo=? AND TarihSaat=?"
         cursor.execute(check_query, (kart_no, zaman_str))
 
         if cursor.fetchone()[0] == 0:
             insert_query = """
-                INSERT INTO CihazLoglari3 (TarihSaat, KartNo, Olay, CihazIP, SeriNo) 
+                INSERT INTO CihazLoglari (TarihSaat, KartNo, Olay, CihazIP, SeriNo) 
                 VALUES (?, ?, ?, ?, ?)
             """
             cursor.execute(insert_query, (zaman_str, kart_no, "Gecmis Kayit", cihaz_ip, seri_no))
