@@ -49,6 +49,21 @@ def sql_yaz(kart_no, zaman_str, cihaz_ip, seri_no):
     except Exception as e:
         print(f"SQL Hatası ({cihaz_ip}): {e}")
 
+def sql_prosedur_calistir():
+    try:
+        conn = pyodbc.connect(
+            f'DRIVER={{SQL Server}};SERVER={server};DATABASE={database};UID={username};PWD={password}'
+        )
+        cursor = conn.cursor()
+
+        # Prosedürü çalıştır
+        cursor.execute("EXEC [dbo].[PDKSDATACOLLECT]")
+        conn.commit()  # SP insert/update yapıyorsa gerekli
+
+        conn.close()
+        print("-> [SQL] dbo.PDKSDATACOLLECT çalıştırıldı.")
+    except Exception as e:
+        print(f"SQL Prosedür Hatası: {e}")
 
 # --- SDK YÜKLEME ---
 if sys.platform == 'win32':
@@ -203,10 +218,13 @@ def main():
     for t in threads:
         t.join()
 
+    sql_prosedur_calistir()
+
     print("-" * 30)
     print("TÜM CİHAZLARIN İŞLEMİ BİTTİ.")
     print("-" * 30)
     sdk.NET_DVR_Cleanup()
+
 
 
 if __name__ == "__main__":
