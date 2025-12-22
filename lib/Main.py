@@ -4,33 +4,63 @@ import time
 import pyodbc
 import threading
 from datetime import datetime, timedelta
-# --- AYARLAR ---
-CIHAZ_LISTESI = [
-   {"ip": "10.50.27.26", "user": "admin", "pass": "valfsan1234"},
-    {"ip": "10.50.27.27", "user": "admin", "pass": "valfsan1234"},
-    {"ip": "10.50.27.28", "user": "admin", "pass": "Abcd1234"},
-    {"ip": "10.50.27.29", "user": "admin", "pass": "Abcd1234"},
-   {"ip": "10.50.27.30", "user": "admin", "pass": "Abcd1234"},
-   {"ip": "10.50.27.31", "user": "admin", "pass": "Abcd1234"},
-]
 
+# --- AYARLAR ---
 server = '172.30.134.15'
 database = 'VALFSAN604'
 username = 'pythonreporter'
 password = '1212casecase,,'
 
 GUN_SAYISI = 1
-SESSISIZLIK_LIMITI = 10  # Cihazdan 5 saniye veri gelmezse bağlantıyı kes
+SESSISIZLIK_LIMITI = 10  # Cihazdan X saniye veri gelmezse bağlantıyı kes
 
 pyodbc.pooling = False
+
+
+# --- SQL'den cihaz listesi çek ---
+def cihaz_listesini_sql_den_cek():
+    """
+    VLFPACSDEVICE tablosundan aktif cihazları çekip
+    [{"ip": "...", "user": "...", "pass": "..."}] formatında döndürür.
+    """
+    cihazlar = []
+    try:
+        conn = pyodbc.connect(
+            f"DRIVER={{SQL Server}};SERVER={server};DATABASE={database};UID={username};PWD={password}",
+            autocommit=True
+        )
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT IPADRESS, USERNAME, PASSWORD
+            FROM VLFPACSDEVICE
+            WHERE ISACTIVE = 1
+        """)
+
+        rows = cursor.fetchall()
+        for ip, user, pwd in rows:
+            ip = (ip or "").strip()
+            user = (user or "").strip()
+            pwd = (pwd or "").strip()
+
+            # boş kayıtları filtrele
+            if ip and user and pwd:
+                cihazlar.append({"ip": ip, "user": user, "pass": pwd})
+
+        conn.close()
+
+    except Exception as e:
+        print(f"[SQL] Cihaz listesi çekilemedi: {e}")
+
+    return cihazlar
 
 
 # --- SQL FONKSİYONU ---
 def sql_yaz(kart_no, zaman_str, cihaz_ip, seri_no):
     try:
-
         conn = pyodbc.connect(
-            f'DRIVER={{SQL Server}};SERVER={server};DATABASE={database};UID={username};PWD={password}')
+            f'DRIVER={{SQL Server}};SERVER={server};DATABASE={database};UID={username};PWD={password}'
+        )
         cursor = conn.cursor()
 
         check_query = "SELECT COUNT(*) FROM CihazLoglari WHERE KartNo=? AND TarihSaat=?"
@@ -49,6 +79,7 @@ def sql_yaz(kart_no, zaman_str, cihaz_ip, seri_no):
     except Exception as e:
         print(f"SQL Hatası ({cihaz_ip}): {e}")
 
+
 def sql_prosedur_calistir():
     try:
         conn = pyodbc.connect(
@@ -56,14 +87,14 @@ def sql_prosedur_calistir():
         )
         cursor = conn.cursor()
 
-        # Prosedürü çalıştır
         cursor.execute("EXEC [dbo].[PDKSDATACOLLECT]")
-        conn.commit()  # SP insert/update yapıyorsa gerekli
+        conn.commit()
 
         conn.close()
         print("-> [SQL] dbo.PDKSDATACOLLECT çalıştırıldı.")
     except Exception as e:
         print(f"SQL Prosedür Hatası: {e}")
+
 
 # --- SDK YÜKLEME ---
 if sys.platform == 'win32':
@@ -77,24 +108,35 @@ sdk.NET_DVR_SetConnectTime(2000, 1)
 
 # --- YAPILAR ---
 class NET_DVR_TIME(Structure):
-    _fields_ = [("dwYear", c_int), ("dwMonth", c_int), ("dwDay", c_int),
-                ("dwHour", c_int), ("dwMinute", c_int), ("dwSecond", c_int)]
+    _fields_ = [
+        ("dwYear", c_int), ("dwMonth", c_int), ("dwDay", c_int),
+        ("dwHour", c_int), ("dwMinute", c_int), ("dwSecond", c_int)
+    ]
 
 
 class NET_DVR_ACS_EVENT_COND(Structure):
-    _fields_ = [("dwSize", c_int), ("dwMajor", c_int), ("dwMinor", c_int),
-                ("struStartTime", NET_DVR_TIME), ("struEndTime", NET_DVR_TIME),
-                ("byCardNo", c_byte * 32), ("byName", c_byte * 32),
-                ("byPicEnable", c_byte), ("byRes2", c_byte * 3),
-                ("dwBeginSerialNo", c_int), ("dwEndSerialNo", c_int), ("byRes", c_byte * 244)]
+    _fields_ = [
+        ("dwSize", c_int), ("dwMajor", c_int), ("dwMinor", c_int),
+        ("struStartTime", NET_DVR_TIME), ("struEndTime", NET_DVR_TIME),
+        ("byCardNo", c_byte * 32), ("byName", c_byte * 32),
+        ("byPicEnable", c_byte), ("byRes2", c_byte * 3),
+        ("dwBeginSerialNo", c_int), ("dwEndSerialNo", c_int),
+        ("byRes", c_byte * 244)
+    ]
 
 
 class NET_DVR_ACS_EVENT_CFG_SHORT(Structure):
-    _fields_ = [("dwSize", c_int), ("dwMajor", c_int), ("dwMinor", c_int), ("struTime", NET_DVR_TIME)]
+    _fields_ = [
+        ("dwSize", c_int), ("dwMajor", c_int), ("dwMinor", c_int),
+        ("struTime", NET_DVR_TIME)
+    ]
 
 
 class NET_DVR_DEVICEINFO_V30(Structure):
-    _fields_ = [("sSerialNumber", c_byte * 48), ("byRes", c_byte * 200)]
+    _fields_ = [
+        ("sSerialNumber", c_byte * 48),
+        ("byRes", c_byte * 200)
+    ]
 
 
 def py_time_to_struct(dt):
@@ -108,20 +150,19 @@ def py_time_to_struct(dt):
 CB_FUNC_TYPE = CFUNCTYPE(c_bool, c_int, c_void_p, c_int, c_void_p)
 
 
-# Parametreye 'durum_takip' sözlüğünü ekledik
 def callback_olustur(cihaz_ip, seri_no, durum_takip):
     def search_callback(dwType, pBuffer, dwBufLen, pUser):
-        # Her veri geldiğinde veya cihaz "ben çalışıyorum" dediğinde zamanı güncelle
+        # Her veri geldiğinde zamanı güncelle
         durum_takip['son_aktivite'] = time.time()
 
         if dwType == 2 and pBuffer and dwBufLen > 0:
             try:
-                # Zamanı Al
+                # Zaman
                 cfg = cast(pBuffer, POINTER(NET_DVR_ACS_EVENT_CFG_SHORT)).contents
                 t = cfg.struTime
                 zaman_str = f"{t.dwYear}-{t.dwMonth:02d}-{t.dwDay:02d} {t.dwHour:02d}:{t.dwMinute:02d}:{t.dwSecond:02d}"
 
-                # Kartı Al (Adres 204)
+                # Kart (offset 204)
                 raw_data = string_at(pBuffer, dwBufLen)
                 offset = 204
                 if dwBufLen > offset:
@@ -133,19 +174,22 @@ def callback_olustur(cihaz_ip, seri_no, durum_takip):
 
             except Exception as e:
                 print(f"Hata ({cihaz_ip}): {e}")
+
         return True
 
     return CB_FUNC_TYPE(search_callback)
 
 
 # --- CİHAZ GÖREVİ (THREAD) ---
-def cihaz_gorevi(ip, user, password):
+def cihaz_gorevi(ip, user, password_):
     print(f"[{ip}] Bağlanılıyor...")
 
     device_info = NET_DVR_DEVICEINFO_V30()
-    user_id = sdk.NET_DVR_Login_V30(ip.encode('utf-8'), 8000,
-                                    user.encode('utf-8'), password.encode('utf-8'),
-                                    byref(device_info))
+    user_id = sdk.NET_DVR_Login_V30(
+        ip.encode('utf-8'), 8000,
+        user.encode('utf-8'), password_.encode('utf-8'),
+        byref(device_info)
+    )
 
     if user_id < 0:
         print(f"[{ip}] BAŞARISIZ! Login Hatası.")
@@ -156,11 +200,7 @@ def cihaz_gorevi(ip, user, password):
     except:
         seri_no = "Bilinmiyor"
 
-    # --- SESSİZLİK TAKİPÇİSİ ---
-    # Bu sözlük, callback ile bu fonksiyon arasında ortak kullanılacak.
     takip_objesi = {'son_aktivite': time.time()}
-
-    # Callback'e bu takip objesini gönderiyoruz
     ozel_callback = callback_olustur(ip, seri_no, takip_objesi)
 
     search_cond = NET_DVR_ACS_EVENT_COND()
@@ -184,15 +224,10 @@ def cihaz_gorevi(ip, user, password):
 
     print(f"[{ip}] Veri çekiliyor... (Sessizlik limiti: {SESSISIZLIK_LIMITI}sn)")
 
-    # --- AKILLI BEKLEME DÖNGÜSÜ ---
     try:
         while True:
-            time.sleep(0.5)  # Yarım saniye bekle
-
-            # Son aktiviteden bu yana geçen süreyi hesapla
+            time.sleep(0.5)
             gecen_sure = time.time() - takip_objesi['son_aktivite']
-
-            # Eğer limit aşıldıysa döngüyü kır
             if gecen_sure > SESSISIZLIK_LIMITI:
                 print(f"[{ip}] Veri akışı tamamlandı (Zaman aşımı).")
                 break
@@ -207,11 +242,21 @@ def cihaz_gorevi(ip, user, password):
 
 # --- ANA PROGRAM ---
 def main():
-    print(f"Toplam {len(CIHAZ_LISTESI)} cihaz taranacak.")
+    cihaz_listesi = cihaz_listesini_sql_den_cek()
+
+    if not cihaz_listesi:
+        print("Aktif cihaz bulunamadı (VLFPACSDEVICE.ISACTIVE=1). Program durduruldu.")
+        sdk.NET_DVR_Cleanup()
+        return
+
+    print(f"Toplam {len(cihaz_listesi)} cihaz taranacak.")
     threads = []
 
-    for cihaz in CIHAZ_LISTESI:
-        t = threading.Thread(target=cihaz_gorevi, args=(cihaz["ip"], cihaz["user"], cihaz["pass"]))
+    for cihaz in cihaz_listesi:
+        t = threading.Thread(
+            target=cihaz_gorevi,
+            args=(cihaz["ip"], cihaz["user"], cihaz["pass"])
+        )
         threads.append(t)
         t.start()
 
@@ -224,8 +269,6 @@ def main():
     print("TÜM CİHAZLARIN İŞLEMİ BİTTİ.")
     print("-" * 30)
     sdk.NET_DVR_Cleanup()
-
-
 
 if __name__ == "__main__":
     main()
