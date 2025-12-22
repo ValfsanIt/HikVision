@@ -282,6 +282,5 @@ def main():
     print("-" * 30)
     sdk.NET_DVR_Cleanup()
 
-
 if __name__ == "__main__":
     main()
