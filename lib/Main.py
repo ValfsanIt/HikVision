@@ -20,20 +20,34 @@ SESSISIZLIK_LIMITI = 10  # Cihazdan X saniye veri gelmezse bağlantıyı kes
 pyodbc.pooling = False
 
 # -------------------- MAIL AYARLARI (Sizdeki örneğe benzer) --------------------
-# --- Mail config ---
-sender_email = "canias@valfsan.com.tr"
-mail_server = "mail.valfsan.com.tr"
-mail_port = 587
+MAIL_MODE = "relay"   # "relay" veya "o365"
 
+sender_email = "canias@valfsan.com.tr"
 MAIL_TO = "canias@valfsan.com.tr"
-MAIL_CC = ""  # "a@x.com;b@y.com" gibi
+MAIL_CC = ""
 
 SMTP_DEBUG = True
-SMTP_SLEEP_AFTER_STARTTLS = 3
-
-# self-signed sertifika için:
-SMTP_VERIFY_CERT = False          # True yaparsan verify eder
+SMTP_VERIFY_CERT = False
 SMTP_CA_FILE = ""
+SMTP_SLEEP_AFTER_STARTTLS = 0
+
+if MAIL_MODE == "o365":
+    mail_server = "smtp.office365.com"
+    mail_port = 587
+    SMTP_USE_STARTTLS = True
+    SMTP_REQUIRE_AUTH = True
+    SMTP_USERNAME = "canias@valfsan.com.tr"
+    SMTP_PASSWORD = ""
+else:
+    # Yerel Exchange relay
+    mail_server = "mail.valfsan.com.tr"
+    mail_port = 25
+    SMTP_USE_STARTTLS = False
+    SMTP_REQUIRE_AUTH = False
+    SMTP_USERNAME = ""
+    SMTP_PASSWORD = ""
+
+##
 
 # -------------------- SQL'DEN CİHAZ LİSTESİ ÇEKME --------------------
 def cihazlari_sql_den_getir():
@@ -143,8 +157,14 @@ def sql_prosedur_calistir():
             conn.close()
 
 
+
 def mail_gonder_exchange(cihaz_sonuclari):
-    hatali = [r for r in cihaz_sonuclari if r.get("status") in ("LOGIN_FAIL", "QUERY_FAIL", "EXCEPTION")]
+    # NO_DATA da mail tetiklesin
+    hatali = [
+        r for r in cihaz_sonuclari
+        if r.get("status") in ("LOGIN_FAIL", "QUERY_FAIL", "EXCEPTION")
+    ]
+
     if not hatali:
         print("-> [MAIL] Hatalı cihaz yok, mail atılmadı.")
         return
@@ -152,8 +172,11 @@ def mail_gonder_exchange(cihaz_sonuclari):
     now_str = time.strftime("%d-%m-%Y %H:%M:%S")
 
     def row_html(r):
-        return (f"<li><b>{r.get('name','')}</b> | IP: {r.get('ip')} | Eklenen: {r.get('inserted',0)} "
-                f"| Durum: {r.get('status')} | Sebep: {r.get('reason','')}</li>")
+        return (
+            f"<li><b>{r.get('name','')}</b> | IP: {r.get('ip')} | "
+            f"Eklenen: {r.get('inserted',0)} | Durum: {r.get('status')} | "
+            f"Sebep: {r.get('reason','')}</li>"
+        )
 
     hatali_html = "\n".join([row_html(r) for r in hatali])
     tum_html = "\n".join([row_html(r) for r in cihaz_sonuclari])
@@ -162,14 +185,15 @@ def mail_gonder_exchange(cihaz_sonuclari):
     <html>
       <body>
         <p>Merhaba,</p>
-        <p><b>{now_str}</b> itibarıyla PDKS cihaz taramasında <b>veri çekilemeyen cihaz(lar)</b> tespit edildi.</p>
+        <p><b>{now_str}</b> itibarıyla PDKS cihaz taramasında
+        <b>veri çekilemeyen / hatalı cihaz(lar)</b> tespit edildi.</p>
 
-        <p><b>Veri çekilemeyen cihazlar:</b></p>
+        <p><b>Problemli cihazlar:</b></p>
         <ul>
           {hatali_html}
         </ul>
 
-        <p><b>Tüm cihazlar özeti (eklenen kayıt sayısı):</b></p>
+        <p><b>Tüm cihazlar özeti:</b></p>
         <ul>
           {tum_html}
         </ul>
@@ -185,22 +209,16 @@ def mail_gonder_exchange(cihaz_sonuclari):
     if MAIL_CC.strip():
         msg["Cc"] = MAIL_CC
     msg["Subject"] = f"PDKS - Cihaz Raporu ({now_str})"
-    msg.attach(MIMEText(body, "html"))
+    msg.attach(MIMEText(body, "html", "utf-8"))
 
-    recipients = [MAIL_TO]
+    recipients = [x.strip() for x in MAIL_TO.replace(";", ",").split(",") if x.strip()]
     if MAIL_CC.strip():
         recipients += [x.strip() for x in MAIL_CC.replace(";", ",").split(",") if x.strip()]
 
     try:
-        # TLS context
         if SMTP_VERIFY_CERT:
-            # önerilen yol: kurum CA'sını ver
-            if SMTP_CA_FILE:
-                context = ssl.create_default_context(cafile=SMTP_CA_FILE)
-            else:
-                context = ssl.create_default_context()
+            context = ssl.create_default_context(cafile=SMTP_CA_FILE) if SMTP_CA_FILE else ssl.create_default_context()
         else:
-            # hızlı yol: self-signed için verify kapat
             context = ssl.create_default_context()
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
@@ -210,11 +228,21 @@ def mail_gonder_exchange(cihaz_sonuclari):
                 smtp.set_debuglevel(1)
 
             smtp.ehlo()
-            smtp.starttls(context=context)
-            smtp.ehlo()
 
-            if SMTP_SLEEP_AFTER_STARTTLS:
-                time.sleep(SMTP_SLEEP_AFTER_STARTTLS)
+            # STARTTLS sadece gerçekten destekleniyorsa çalıştır
+            if SMTP_USE_STARTTLS:
+                if not smtp.has_extn("starttls"):
+                    raise RuntimeError(
+                        f"SMTP sunucusu STARTTLS desteklemiyor: {mail_server}:{mail_port}"
+                    )
+                smtp.starttls(context=context)
+                smtp.ehlo()
+
+                if SMTP_SLEEP_AFTER_STARTTLS:
+                    time.sleep(SMTP_SLEEP_AFTER_STARTTLS)
+
+            if SMTP_REQUIRE_AUTH:
+                smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
 
             smtp.sendmail(sender_email, recipients, msg.as_string())
             print("-> [MAIL] Email successfully sent!")
