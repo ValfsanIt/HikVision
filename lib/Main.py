@@ -5,7 +5,12 @@ import pyodbc
 import threading
 from datetime import datetime, timedelta
 
-# --- SQL BAĞLANTI AYARLARI ---
+import smtplib
+import ssl
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+# -------------------- SQL BAĞLANTI AYARLARI --------------------
 server = '172.30.134.15'
 database = 'VALFSAN604'
 username = 'pythonreporter'
@@ -14,12 +19,28 @@ password = '1212casecase,,'
 SESSISIZLIK_LIMITI = 10  # Cihazdan X saniye veri gelmezse bağlantıyı kes
 pyodbc.pooling = False
 
+# -------------------- MAIL AYARLARI (Sizdeki örneğe benzer) --------------------
+# --- Mail config ---
+sender_email = "canias@valfsan.com.tr"
+mail_server = "mail.valfsan.com.tr"
+mail_port = 587
 
-# --- SQL'DEN CİHAZ LİSTESİ ÇEKME ---
+MAIL_TO = "canias@valfsan.com.tr"
+MAIL_CC = ""  # "a@x.com;b@y.com" gibi
+
+SMTP_DEBUG = True
+SMTP_SLEEP_AFTER_STARTTLS = 3
+
+# self-signed sertifika için:
+SMTP_VERIFY_CERT = False          # True yaparsan verify eder
+SMTP_CA_FILE = ""
+
+# -------------------- SQL'DEN CİHAZ LİSTESİ ÇEKME --------------------
 def cihazlari_sql_den_getir():
     """
     VLFPACSDEVICE tablosundan aktif cihazları çeker.
     DDAY her cihazın kaç gün geriye taranacağını belirler.
+    NAME mail raporunda kullanılacak.
     """
     conn = None
     try:
@@ -29,26 +50,24 @@ def cihazlari_sql_den_getir():
         cursor = conn.cursor()
 
         query = """
-            SELECT IPADRESS, USERNAME, PASSWORD, DDAY
+            SELECT IPADRESS, USERNAME, PASSWORD, DDAY, NAME
             FROM VLFPACSDEVICE
             WHERE ISACTIVE = 1
         """
         cursor.execute(query)
 
         cihaz_listesi = []
-        rows = cursor.fetchall()
-
-        for row in rows:
+        for row in cursor.fetchall():
             ip = (row.IPADRESS or "").strip()
             user_ = (row.USERNAME or "").strip()
             pass_ = (row.PASSWORD or "").strip()
+            name_ = (row.NAME or "").strip()
 
             try:
                 dday = int(row.DDAY) if row.DDAY is not None else 1
             except:
                 dday = 1
 
-            # güvenlik: 0 veya negatif gelirse 1 yap
             if dday <= 0:
                 dday = 1
 
@@ -57,7 +76,8 @@ def cihazlari_sql_den_getir():
                     "ip": ip,
                     "user": user_,
                     "pass": pass_,
-                    "dday": dday
+                    "dday": dday,
+                    "name": name_
                 })
 
         return cihaz_listesi
@@ -70,8 +90,12 @@ def cihazlari_sql_den_getir():
             conn.close()
 
 
-# --- SQL FONKSİYONU ---
+# -------------------- SQL YAZMA --------------------
 def sql_yaz(kart_no, zaman_str, cihaz_ip, seri_no):
+    """
+    Kayıt eklendiyse True, eklenmediyse False döner.
+    """
+    conn = None
     try:
         conn = pyodbc.connect(
             f'DRIVER={{SQL Server}};SERVER={server};DATABASE={database};UID={username};PWD={password}'
@@ -83,19 +107,25 @@ def sql_yaz(kart_no, zaman_str, cihaz_ip, seri_no):
 
         if cursor.fetchone()[0] == 0:
             insert_query = """
-                INSERT INTO CihazLoglari (TarihSaat, KartNo, Olay, CihazIP, SeriNo) 
+                INSERT INTO CihazLoglari (TarihSaat, KartNo, Olay, CihazIP, SeriNo)
                 VALUES (?, ?, ?, ?, ?)
             """
             cursor.execute(insert_query, (zaman_str, kart_no, "Gecmis Kayit", cihaz_ip, seri_no))
             conn.commit()
             print(f"-> [SQL - {cihaz_ip}] Eklendi: {kart_no}")
+            return True
 
-        conn.close()
+        return False
     except Exception as e:
         print(f"SQL Hatası ({cihaz_ip}): {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
 
 
 def sql_prosedur_calistir():
+    conn = None
     try:
         conn = pyodbc.connect(
             f'DRIVER={{SQL Server}};SERVER={server};DATABASE={database};UID={username};PWD={password}'
@@ -105,13 +135,94 @@ def sql_prosedur_calistir():
         cursor.execute("EXEC [dbo].[PDKSDATACOLLECT]")
         conn.commit()
 
-        conn.close()
         print("-> [SQL] dbo.PDKSDATACOLLECT çalıştırıldı.")
     except Exception as e:
         print(f"SQL Prosedür Hatası: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
-# --- SDK YÜKLEME ---
+def mail_gonder_exchange(cihaz_sonuclari):
+    hatali = [r for r in cihaz_sonuclari if r.get("status") in ("LOGIN_FAIL", "QUERY_FAIL", "EXCEPTION")]
+    if not hatali:
+        print("-> [MAIL] Hatalı cihaz yok, mail atılmadı.")
+        return
+
+    now_str = time.strftime("%d-%m-%Y %H:%M:%S")
+
+    def row_html(r):
+        return (f"<li><b>{r.get('name','')}</b> | IP: {r.get('ip')} | Eklenen: {r.get('inserted',0)} "
+                f"| Durum: {r.get('status')} | Sebep: {r.get('reason','')}</li>")
+
+    hatali_html = "\n".join([row_html(r) for r in hatali])
+    tum_html = "\n".join([row_html(r) for r in cihaz_sonuclari])
+
+    body = f"""
+    <html>
+      <body>
+        <p>Merhaba,</p>
+        <p><b>{now_str}</b> itibarıyla PDKS cihaz taramasında <b>veri çekilemeyen cihaz(lar)</b> tespit edildi.</p>
+
+        <p><b>Veri çekilemeyen cihazlar:</b></p>
+        <ul>
+          {hatali_html}
+        </ul>
+
+        <p><b>Tüm cihazlar özeti (eklenen kayıt sayısı):</b></p>
+        <ul>
+          {tum_html}
+        </ul>
+
+        <p>Saygılarımızla,</p>
+      </body>
+    </html>
+    """
+
+    msg = MIMEMultipart()
+    msg["From"] = sender_email
+    msg["To"] = MAIL_TO
+    if MAIL_CC.strip():
+        msg["Cc"] = MAIL_CC
+    msg["Subject"] = f"PDKS - Cihaz Raporu ({now_str})"
+    msg.attach(MIMEText(body, "html"))
+
+    recipients = [MAIL_TO]
+    if MAIL_CC.strip():
+        recipients += [x.strip() for x in MAIL_CC.replace(";", ",").split(",") if x.strip()]
+
+    try:
+        # TLS context
+        if SMTP_VERIFY_CERT:
+            # önerilen yol: kurum CA'sını ver
+            if SMTP_CA_FILE:
+                context = ssl.create_default_context(cafile=SMTP_CA_FILE)
+            else:
+                context = ssl.create_default_context()
+        else:
+            # hızlı yol: self-signed için verify kapat
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+        with smtplib.SMTP(mail_server, mail_port, timeout=60) as smtp:
+            if SMTP_DEBUG:
+                smtp.set_debuglevel(1)
+
+            smtp.ehlo()
+            smtp.starttls(context=context)
+            smtp.ehlo()
+
+            if SMTP_SLEEP_AFTER_STARTTLS:
+                time.sleep(SMTP_SLEEP_AFTER_STARTTLS)
+
+            smtp.sendmail(sender_email, recipients, msg.as_string())
+            print("-> [MAIL] Email successfully sent!")
+
+    except Exception as e:
+        print(f"[MAIL HATASI] Failed to send email: {e}")
+
+# -------------------- SDK YÜKLEME --------------------
 if sys.platform == 'win32':
     sdk = CDLL(r".\HCNetSDK.dll")
 else:
@@ -121,7 +232,7 @@ sdk.NET_DVR_Init()
 sdk.NET_DVR_SetConnectTime(2000, 1)
 
 
-# --- YAPILAR ---
+# -------------------- YAPILAR --------------------
 class NET_DVR_TIME(Structure):
     _fields_ = [
         ("dwYear", c_int), ("dwMonth", c_int), ("dwDay", c_int),
@@ -161,14 +272,13 @@ def py_time_to_struct(dt):
     return t
 
 
-# --- CALLBACK FABRİKASI ---
+# -------------------- CALLBACK --------------------
 CB_FUNC_TYPE = CFUNCTYPE(c_bool, c_int, c_void_p, c_int, c_void_p)
 
 
 def callback_olustur(cihaz_ip, seri_no, durum_takip):
     def search_callback(dwType, pBuffer, dwBufLen, pUser):
-        # her veri geldiğinde zamanı güncelle
-        durum_takip['son_aktivite'] = time.time()
+        durum_takip["son_aktivite"] = time.time()
 
         if dwType == 2 and pBuffer and dwBufLen > 0:
             try:
@@ -183,7 +293,9 @@ def callback_olustur(cihaz_ip, seri_no, durum_takip):
                     kart_no = raw_card.partition(b'\0')[0].decode('utf-8', 'ignore').strip()
 
                     if kart_no and len(kart_no) > 2:
-                        sql_yaz(kart_no, zaman_str, cihaz_ip, seri_no)
+                        eklendi = sql_yaz(kart_no, zaman_str, cihaz_ip, seri_no)
+                        if eklendi:
+                            durum_takip["inserted_count"] += 1
 
             except Exception as e:
                 print(f"Hata ({cihaz_ip}): {e}")
@@ -193,19 +305,33 @@ def callback_olustur(cihaz_ip, seri_no, durum_takip):
     return CB_FUNC_TYPE(search_callback)
 
 
-# --- CİHAZ GÖREVİ (THREAD) ---
-def cihaz_gorevi(ip, user, password, gun_sayisi):
+# -------------------- CİHAZ GÖREVİ (THREAD) --------------------
+def cihaz_gorevi(ip, user, password_, gun_sayisi, cihaz_adi, sonuc_listesi, sonuc_lock):
     print(f"[{ip}] Bağlanılıyor... (DDAY={gun_sayisi})")
+
+    result = {
+        "ip": ip,
+        "name": cihaz_adi,
+        "dday": gun_sayisi,
+        "seri_no": "",
+        "inserted": 0,
+        "status": "UNKNOWN",
+        "reason": ""
+    }
 
     device_info = NET_DVR_DEVICEINFO_V30()
     user_id = sdk.NET_DVR_Login_V30(
-        ip.encode('utf-8'), 8000,
-        user.encode('utf-8'), password.encode('utf-8'),
+        ip.encode("utf-8"), 8000,
+        user.encode("utf-8"), password_.encode("utf-8"),
         byref(device_info)
     )
 
     if user_id < 0:
         print(f"[{ip}] BAŞARISIZ! Login Hatası.")
+        result["status"] = "LOGIN_FAIL"
+        result["reason"] = "Login başarısız"
+        with sonuc_lock:
+            sonuc_listesi.append(result)
         return
 
     try:
@@ -213,7 +339,9 @@ def cihaz_gorevi(ip, user, password, gun_sayisi):
     except:
         seri_no = "Bilinmiyor"
 
-    takip_objesi = {'son_aktivite': time.time()}
+    result["seri_no"] = seri_no
+
+    takip_objesi = {"son_aktivite": time.time(), "inserted_count": 0}
     ozel_callback = callback_olustur(ip, seri_no, takip_objesi)
 
     search_cond = NET_DVR_ACS_EVENT_COND()
@@ -226,33 +354,53 @@ def cihaz_gorevi(ip, user, password, gun_sayisi):
     search_cond.struStartTime = py_time_to_struct(start_dt)
     search_cond.struEndTime = py_time_to_struct(now)
 
-    handle = sdk.NET_DVR_StartRemoteConfig(
-        user_id, 2514, byref(search_cond), sizeof(search_cond), ozel_callback, None
-    )
-
-    if handle < 0:
-        print(f"[{ip}] Sorgu Başlamadı.")
-        sdk.NET_DVR_Logout(user_id)
-        return
-
-    print(f"[{ip}] Veri çekiliyor... (Sessizlik limiti: {SESSISIZLIK_LIMITI}sn)")
-
+    handle = -1
     try:
+        handle = sdk.NET_DVR_StartRemoteConfig(
+            user_id, 2514, byref(search_cond), sizeof(search_cond), ozel_callback, None
+        )
+
+        if handle < 0:
+            print(f"[{ip}] Sorgu Başlamadı.")
+            result["status"] = "QUERY_FAIL"
+            result["reason"] = "NET_DVR_StartRemoteConfig başarısız"
+            return
+
+        print(f"[{ip}] Veri çekiliyor... (Sessizlik limiti: {SESSISIZLIK_LIMITI}sn)")
+
         while True:
             time.sleep(0.5)
-            gecen_sure = time.time() - takip_objesi['son_aktivite']
-            if gecen_sure > SESSISIZLIK_LIMITI:
+            if (time.time() - takip_objesi["son_aktivite"]) > SESSISIZLIK_LIMITI:
                 print(f"[{ip}] Veri akışı tamamlandı (Zaman aşımı).")
                 break
-    except KeyboardInterrupt:
-        pass
 
-    sdk.NET_DVR_StopRemoteConfig(handle)
-    sdk.NET_DVR_Logout(user_id)
-    print(f"[{ip}] Bağlantı kapatıldı.")
+        result["inserted"] = takip_objesi["inserted_count"]
+        result["status"] = "OK" if result["inserted"] > 0 else "NO_DATA"
+        result["reason"] = "Başarılı" if result["inserted"] > 0 else f"{gun_sayisi} gün aralığında kayıt gelmedi"
+
+    except Exception as e:
+        print(f"[{ip}] Thread exception: {e}")
+        result["status"] = "EXCEPTION"
+        result["reason"] = str(e)
+
+    finally:
+        try:
+            if handle is not None and handle >= 0:
+                sdk.NET_DVR_StopRemoteConfig(handle)
+        except:
+            pass
+
+        try:
+            sdk.NET_DVR_Logout(user_id)
+        except:
+            pass
+
+        print(f"[{ip}] Bağlantı kapatıldı.")
+        with sonuc_lock:
+            sonuc_listesi.append(result)
 
 
-# --- ANA PROGRAM ---
+# -------------------- ANA PROGRAM --------------------
 def main():
     CIHAZ_LISTESI = cihazlari_sql_den_getir()
 
@@ -264,10 +412,13 @@ def main():
     print(f"Toplam {len(CIHAZ_LISTESI)} cihaz taranacak.")
     threads = []
 
+    sonuc_listesi = []
+    sonuc_lock = threading.Lock()
+
     for cihaz in CIHAZ_LISTESI:
         t = threading.Thread(
             target=cihaz_gorevi,
-            args=(cihaz["ip"], cihaz["user"], cihaz["pass"], cihaz["dday"])
+            args=(cihaz["ip"], cihaz["user"], cihaz["pass"], cihaz["dday"], cihaz.get("name", ""), sonuc_listesi, sonuc_lock)
         )
         threads.append(t)
         t.start()
@@ -277,10 +428,14 @@ def main():
 
     sql_prosedur_calistir()
 
+    # Sadece veri çekilemeyen cihaz varsa mail atar
+    mail_gonder_exchange(sonuc_listesi)
+
     print("-" * 30)
     print("TÜM CİHAZLARIN İŞLEMİ BİTTİ.")
     print("-" * 30)
     sdk.NET_DVR_Cleanup()
+
 
 if __name__ == "__main__":
     main()
