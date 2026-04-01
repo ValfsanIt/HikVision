@@ -24,7 +24,7 @@ MAIL_MODE = "relay"   # "relay" veya "o365"
 
 sender_email = "canias@valfsan.com.tr"
 MAIL_TO = "canias@valfsan.com.tr"
-MAIL_CC = ""
+MAIL_CC = "insankaynaklari@valfsan.com.tr"
 
 SMTP_DEBUG = True
 SMTP_VERIFY_CERT = False
